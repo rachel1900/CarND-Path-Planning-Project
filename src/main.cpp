@@ -2,7 +2,7 @@
 #include <fstream>
 #include <iostream>
 #include <string>
-#include <vector>
+#include "vector"
 #include "Eigen-3.3/Eigen/Core"
 #include "Eigen-3.3/Eigen/QR"
 #include "helpers.h"
@@ -51,15 +51,16 @@ int main() {
         map_waypoints_dy.push_back(d_y);
     }
     //ADD RQ
-    //start at lane 1
+    //start at lane 1 right lane is 2; left lane is 0
     int lane = 1;
     //have a velocity to target
-    double ref_vel = 49.5; //mph
+    // double ref_vel = 49.5; //mph
+    double ref_vel = 0.0; //mph
     //END ADD RQ
 
 
-    h.onMessage([&map_waypoints_x, &map_waypoints_y, &map_waypoints_s,
-        &map_waypoints_dx, &map_waypoints_dy]
+    h.onMessage([&ref_vel, &map_waypoints_x, &map_waypoints_y, &map_waypoints_s,
+        &map_waypoints_dx, &map_waypoints_dy, &lane]
         (uWS::WebSocket<uWS::SERVER> ws, char* data, size_t length,
             uWS::OpCode opCode) {
                 // "42" at the start of the message means there's a websocket message event.
@@ -86,7 +87,7 @@ int main() {
                             double car_speed = j[1]["speed"];
 
                             // Previous path data given to the Planner
-                            auto previous_path_x = j[1]["previous_path_x"];
+                            auto previous_path_x = j[1]["previous_path_x"]; // the left ungone points from previous path
                             auto previous_path_y = j[1]["previous_path_y"];
                             // Previous path's end s and d values
                             double end_path_s = j[1]["end_path_s"];
@@ -98,21 +99,22 @@ int main() {
 
 
                             // ADD RQ
-                            int prev_size = previous_path_x.size();
-
-                            //if (prev_size > 0)
-                            //{
-                            //    car_s = end_path_s;
-                            //}
+                            int prev_size = previous_path_x.size(); // the last path the car is following
+                            // start of avoiding collision
+                            if (prev_size > 0)
+                            {
+                                car_s = end_path_s;
+                            }
 
                             bool too_close = false;
 
                             // find ref_v to use
-                            // sensor_fusion[n]=[id,x,y,vx,vy,s,d]
+                            
                             for (int i = 0;i < sensor_fusion.size();i++) {
                                 //car is in my lane
-                                float d = sensor_fusion[i][6];
-
+                                float d = sensor_fusion[i][6]; //d is which lane this car is
+                                // sensor_fusion[i]=[id,x,y,vx,vy,s,d]
+                                
                                 // CHECK if the car is within lane
                                 if (d<(2 + 4 * lane + 2) && d>(2 + 4 * lane - 2)) {
 
@@ -120,22 +122,26 @@ int main() {
                                     double vy = sensor_fusion[i][4];
                                     double check_speed = sqrt(vx * vx + vy * vy);
                                     double check_car_s = sensor_fusion[i][5];
-                                    check_car_s += ((double)prev_size * .02 * check_speed);// use a previous points can project s value out of speed
+                                    
+                                    check_car_s += ((double)prev_size * .02 * check_speed);
+                                    // use a previous points can project s value out of speed
                                     //0.02 is the refresh frequency
 
 
                                     //check s values greater then mine and s gap
-                                    if ((check_car_s > car.s) && (check_car_s - car.s) < 30) {
+                                    if ((check_car_s > car_s) && (check_car_s - car_s) < 30) {
                                         // do some logic here, lower reference velocity, so we dont crash into the car infront of us
                                         //could
                                         //also flag to try to change lane
-                                        ref_vel = 29.5;//mph
-                                        //too_close = true;
+                                        //ref_vel = 29.5;//mph
+                                        too_close = true;
                                     }
 
                                 }
 
                             }
+                            
+
 
                             if (too_close) {
                                 ref_vel -= .224;
@@ -143,7 +149,7 @@ int main() {
                             else if (ref_vel < 49.5) {
                                 ref_vel += .224;
                             }
-
+                            //end of avoiding collsiion
 
                             // creat a  list of widely space (x,y) waypoints, evenly spaced at 30m
                             //later we will interproplate these points with a spline and fill it in with more points
@@ -159,6 +165,7 @@ int main() {
                             double ref_yaw = deg2rad(car_yaw);
 
                             //if previous size is almost empty, use the car as starting reference
+                            
                             if (prev_size < 2) {
                                 //use two points that make the path tangent to the car
                                 double prev_car_x = car_x - cos(car_yaw);
@@ -170,29 +177,53 @@ int main() {
                                 ptsy.push_back(prev_car_y);
                                 ptsy.push_back(car_y);
                             }
+                            else
+                            {
+                                // Redefine reference state as previous path and point
+                                ref_x = previous_path_x[prev_size-1];
+                                ref_y = previous_path_y[prev_size-1];
+                                
+                                double ref_x_prev = previous_path_x[prev_size-2];
+                                double ref_y_prev = previous_path_y[prev_size-2];
+                                ref_yaw = atan2(ref_y-ref_y_prev,ref_x-ref_x_prev);
+                                
+                                // use two points to make the path tangent to the previous path's end point
+                                ptsx.push_back(ref_x_prev);
+                                ptsx.push_back(ref_x);
 
+                                ptsy.push_back(ref_y_prev);
+                                ptsy.push_back(ref_y);
+                                
+                            }
+                            
+                            
                             // in Frenet add evenly 30m spaced points ahead of the starting reference
-                            vector < double > next_wp0 = getXY(car_s + 30,(2+4*lane),map_waypoints_s,map_waypoints_x,map_waypoints_y);
-                            vector < double > next_wp1 = getXY(car_s + 60, (2 + 4 * lane), map_waypoints_s, map_waypoints_x, map_waypoints_y);
-                            vector < double > next_wp2 = getXY(car_s + 90, (2 + 4 * lane), map_waypoints_s, map_waypoints_x, map_waypoints_y);
+                            // the location of car  in 30,60,90 meters
+                            vector < double > next_wp0 = getXY(car_s +30,(2+4* lane),map_waypoints_s,map_waypoints_x,map_waypoints_y);
+                            vector < double > next_wp1 = getXY(car_s +60, (2+4*lane), map_waypoints_s, map_waypoints_x,map_waypoints_y);
+                            vector < double > next_wp2 = getXY(car_s +90, (2+4*lane), map_waypoints_s, map_waypoints_x,map_waypoints_y);
 
                             ptsx.push_back(next_wp0[0]);
                             ptsx.push_back(next_wp1[0]);
                             ptsx.push_back(next_wp2[0]);
 
-                            ptsx.push_back(next_wp0[1]);
-                            ptsx.push_back(next_wp1[1]);
-                            ptsx.push_back(next_wp2[1]);
+                            ptsy.push_back(next_wp0[1]);
+                            ptsy.push_back(next_wp1[1]);
+                            ptsy.push_back(next_wp2[1]);
+                            //ptsx includs 5 points:
+                            //the last two points from previous path/ loacation of car & calculated previous location of the car
+                            //+ 3 points from map
 
-
+                            // translation into local car cordinater
+                            // make sure the car or the last point of the path is at ZERO
                             for (int i = 0; i < ptsx.size();i++)
                             {
                             // shift car reference angle to 0 degree
                                 double shift_x = ptsx[i] - ref_x;
-                                double shitt_y = ptsy[i] - ref_y;
+                                double shift_y = ptsy[i] - ref_y;
 
                                 ptsx[i] = (shift_x *cos(0-ref_yaw)-shift_y*sin(0-ref_yaw));
-                                ptsy[i] = (shift_x * sin(0 - ref_yaw) - shift_y * cos(0 - ref_yaw));
+                                ptsy[i] = (shift_x * sin(0 - ref_yaw) +shift_y * cos(0 - ref_yaw));
                             
                             }
 
@@ -204,7 +235,8 @@ int main() {
                             //define the actual (x,y) we will use for planner
                             vector<double> next_x_vals; //next point send to simulator instead of speed
                             vector<double> next_y_vals; //next point send to simulator instead of speed
-
+                            
+                            //start with all of the previous path points from last time instead of start from scrach
                             for (int i = 0; i < previous_path_x.size();i++)
                             {
                                 next_x_vals.push_back(previous_path_x[i]);
@@ -223,16 +255,18 @@ int main() {
 
                             for (int i = 1; i <= 50 - previous_path_x.size();i++)
                             {
-                                double N = (target_dist / (.02 * ref_vel / 2.24));
+                                double N = (target_dist / (.02 * ref_vel / 2.24)); //0.02 is the frequency of refresh which means car moves every 0.02s
+                                // N * 0.02 * vel = target_dist
+                                // (/2.24) transiting mp/h into m/s
                                 double x_point = x_add_on + (target_x) / N;
-                                double y_point = s(y);
+                                double y_point = s(x_point);
 
-                                x_add_on = x_point；
+                                x_add_on = x_point;
 
                                 double x_ref = x_point;
                                 double y_ref = y_point;
 
-                                //rotate back to normal after rotation it eariler
+                                //translate back to GLK gloal coordernate system after rotation it eariler
 
                                 x_point = (x_ref * cos(ref_yaw) - y_ref * sin(ref_yaw));
                                 y_point = (x_ref * sin(ref_yaw) + y_ref * cos(ref_yaw));
